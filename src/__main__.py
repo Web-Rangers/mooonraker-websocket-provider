@@ -8,7 +8,7 @@ from fastapi import FastAPI, WebSocket
 from starlette.responses import HTMLResponse
 from websockets import WebSocketClientProtocol
 
-MOONRAKER_HOST = 'ws://192.168.1.237/websocket'
+MOONRAKER_HOST = 'ws://192.168.0.105/websocket'
 TEMPERATURE_REQUEST = json.dumps({
             "jsonrpc": "2.0",
             "method": "server.temperature_store",
