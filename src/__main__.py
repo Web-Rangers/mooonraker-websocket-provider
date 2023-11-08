@@ -17,7 +17,7 @@ class JsonRpcResponse(NamedTuple):
     result: Optional[Dict[str, Any]]
 
 
-class JsonRpcRequestMessageFilter:
+class JsonRpcRequestMessageWrapper:
     def __init__(self, req: 'JsonRpcRequest', websocket_connection: WebSocketClientProtocol) -> None:
         self._req = req
         self._conn = websocket_connection
@@ -80,7 +80,7 @@ async def main():
             id=1
         )
     async with websockets.connect(MOONRAKER_HOST) as websocket_connection:
-        async with JsonRpcRequestMessageFilter(request_, websocket_connection) as messages_manager:
+        async with JsonRpcRequestMessageWrapper(request_, websocket_connection) as messages_manager:
             async for message in messages_manager.iterate_messages():
                 print(f"Received from server: {message}")
 
