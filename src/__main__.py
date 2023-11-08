@@ -1,22 +1,13 @@
 import asyncio
 import json
-import time
+from asyncio import Task
 from typing import AsyncIterator, NamedTuple, Dict, Any, Optional
 
 import websockets
-from fastapi import FastAPI, WebSocket
-from starlette.responses import HTMLResponse
+from aiohttp import web
 from websockets import WebSocketClientProtocol
 
-MOONRAKER_HOST = 'ws://192.168.0.105/websocket'
-TEMPERATURE_REQUEST = json.dumps({
-            "jsonrpc": "2.0",
-            "method": "server.temperature_store",
-            "params": {
-                "include_monitors": False
-            },
-            "id": 1
-        });
+from src.env import MOONRAKER_HOST, MOONRAKER_WEBSOCKET_PROVIDER_PORT, TEMP_UPDATE_TIME
 
 
 class JsonRpcResponse(NamedTuple):
@@ -26,18 +17,29 @@ class JsonRpcResponse(NamedTuple):
     result: Optional[Dict[str, Any]]
 
 
-class JsonRpcRequest(NamedTuple):
-    jsonrpc: str
-    method: str
-    params: Dict[str, Any]
-    id: int
+class JsonRpcRequestMessageFilter:
+    def __init__(self, req: 'JsonRpcRequest', websocket_connection: WebSocketClientProtocol) -> None:
+        self._req = req
+        self._conn = websocket_connection
+        self._task: Task
 
-    async def iterate_messages(self, websocket_connection:WebSocketClientProtocol) -> AsyncIterator[JsonRpcResponse]:
+    async def __aenter__(self):
+        self._task = asyncio.create_task(self.consume_websocket_request_iterator(self._conn))
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self._task.cancel()
+
+    async def consume_websocket_request_iterator(self, websocket_connection: WebSocketClientProtocol) -> None:
+        async for req in iterate_websocket_request(websocket_connection, json.dumps(self._req._asdict())):
+            print(req)
+
+    async def iterate_messages(self) -> AsyncIterator[JsonRpcResponse]:
         message_data: Dict[str, Any]
-        async for message in iterate_websocket_request(websocket_connection, json.dumps(self._asdict())):
+        async for message in iterate_websocket_response(self._conn):
             message_data = json.loads(message)
-            print(message_data)
-            if message_data.get("id", -1) == self.id:
+            if message_data.get("id", -1) == self._req.id:
+                print(message_data)
                 yield JsonRpcResponse(
                     jsonrpc=message_data.get("jsonrpc"),
                     method=message_data.get("method", None),
@@ -46,42 +48,50 @@ class JsonRpcRequest(NamedTuple):
                 )
 
 
-app = FastAPI()
+class JsonRpcRequest(NamedTuple):
+    jsonrpc: str
+    method: str
+    params: Dict[str, Any]
+    id: int
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    while True:
-        data = await websocket.receive_text()
-        await websocket.send_text(f"Message text was: {data}")
+async def iterate_websocket_request(websocket_connection: WebSocketClientProtocol, request: str) -> AsyncIterator[str]:
+    while websocket_connection.open:
+        yield await websocket_connection.send(request)
+        await asyncio.sleep(TEMP_UPDATE_TIME)
 
 
-@app.get("/")
-async def api_endpoint():
-    return HTMLResponse()
-
-
-async def iterate_websocket_request(websocket_connection:WebSocketClientProtocol, request:str)->AsyncIterator[str]:
-    while True:
-        await websocket_connection.send(request)
+async def iterate_websocket_response(websocket_connection: WebSocketClientProtocol) -> AsyncIterator[str]:
+    while websocket_connection.open:
         yield await websocket_connection.recv()
-        time.sleep(1)
+
+
+async def handle_hi(request: web.Request) -> web.Response[str]:
+    return web.Response(body="HI")
 
 
 async def main():
-    async with websockets.connect(MOONRAKER_HOST) as websocket_connection:
-        async for message in JsonRpcRequest(
+    request_ = JsonRpcRequest(
             jsonrpc="2.0",
             method="server.temperature_store",
             params={
                 "include_monitors": False
             },
             id=1
-        ).iterate_messages(websocket_connection):
-            print(f"Received from server: {message}")
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        )
+    async with websockets.connect(MOONRAKER_HOST) as websocket_connection:
+        async with JsonRpcRequestMessageFilter(request_, websocket_connection) as messages_manager:
+            async for message in messages_manager.iterate_messages():
+                print(f"Received from server: {message}")
+
+    app = web.Application()
+    app.add_routes([
+        web.get("/", handle_hi),
+    ])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, port=MOONRAKER_WEBSOCKET_PROVIDER_PORT)
+    await site.start()
 
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(main())
